@@ -520,6 +520,11 @@ static ggml_backend_buffer_t ggml_backend_zendnn_device_buffer_from_host_ptr(ggm
     GGML_UNUSED(dev);
     GGML_UNUSED(max_tensor_size);
 }
+static bool ggml_zendnn_adaptive_fallback_enabled() {
+    static const bool enabled = (std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK") == nullptr) ||
+                                (std::strcmp(std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK"), "0") != 0);
+    return enabled;
+}
 
 static bool ggml_backend_zendnn_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     switch (op->op) {
@@ -540,25 +545,29 @@ static bool ggml_backend_zendnn_device_supports_op(ggml_backend_dev_t dev, const
             const int64_t ne0 = op->ne[0];
             const int64_t ne1 = op->ne[1];
             
-            const int64_t K = inputs->ne[0]; 
-            const int64_t N = (inputs->ne[1]*inputs->ne[2]*inputs->ne[3]);
-            const int64_t M = weights->ne[1];
-            if(K <= 256 || N <= 128 || M <= 96) {
-                return false;
+            if (ggml_zendnn_adaptive_fallback_enabled()) {
+                const int64_t K = inputs->ne[0]; 
+                const int64_t N = (inputs->ne[1]*inputs->ne[2]*inputs->ne[3]);
+                const int64_t M = weights->ne[1];
+                if(K <= 256 || N <= 128 || M <= 96) {
+                    return false;
+                }
             }
 
             if (!ggml_is_contiguous(weights) || !ggml_is_contiguous(inputs)) {
                 return false;
             }
-            // MUL_MAT_ID performs best with a moderate number of experts due to its
-            // gather + batched matmul + scatter approach. Future versions will leverage
-            // ZenDNN's grouped_gemm for better scalability with larger expert counts:
-            // https://github.com/amd/ZenDNN/blob/main/docs/operator/lowoha_group_gemm_operator.md
-            if (op->op == GGML_OP_MUL_MAT_ID) {
-                const int64_t n_experts = weights->ne[2];
-                const int64_t max_experts = 32;
-                if (n_experts > max_experts) {
-                    return false;
+
+            if (ggml_zendnn_adaptive_fallback_enabled()) {
+                // MUL_MAT_ID performs best with a moderate number of experts due to its
+                // gather + batched matmul + scatter approach. Future versions will leverage
+                // ZenDNN's grouped_gemm for better scalability with larger expert counts:
+                // https://github.com/amd/ZenDNN/blob/main/docs/operator/lowoha_group_gemm_operator.md
+                if (op->op == GGML_OP_MUL_MAT_ID) {
+                    const int64_t n_experts = weights->ne[2];
+                    if (n_experts > 32) {
+                        return false;
+                    }
                 }
             }
             switch (weights->type) {
