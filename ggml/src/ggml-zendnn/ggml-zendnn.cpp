@@ -47,6 +47,7 @@ static bool ggml_zendnn_matmul(ggml_backend_zendnn_context * ctx, int64_t m, int
     params.dtypes.dst = ggml_to_zendnn_type<TC>();
     params.num_threads = ctx->n_threads;
 
+    zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
     zendnnl::error_handling::status_t status = zendnnl::lowoha::matmul::matmul_direct(
         'r', false, true,   // row-major, don't transpose B, transpose A (because it's column-major)
         n,                  // M: rows of B and C
@@ -59,7 +60,7 @@ static bool ggml_zendnn_matmul(ggml_backend_zendnn_context * ctx, int64_t m, int
         0.0f,               // beta
         C, ldc,             // output C[n,m]
         true,               // is_weights_const
-        {},                 // batch_params
+        batch_params,       // batch_params
         params              // params
     );
 
@@ -402,13 +403,19 @@ static ggml_status ggml_backend_zendnn_graph_compute(ggml_backend_t backend, ggm
     GGML_UNUSED(backend);
 }
 
+struct ggml_backend_zendnn_device_context {
+    int n_threads = GGML_DEFAULT_N_THREADS;
+};
+// Single global instance — device is a singleton anyway
+static ggml_backend_zendnn_device_context g_zendnn_dev_ctx;
+
 static struct ggml_backend_i ggml_backend_zendnn_i = {
     /* .get_name                = */ ggml_backend_zendnn_get_name,
     /* .free                    = */ ggml_backend_zendnn_free,
     /* .set_tensor_async        = */ NULL,
     /* .get_tensor_async        = */ NULL,
-    /* .set_tensor_2d_async     = */ NULL,
     /* .get_tensor_2d_async     = */ NULL,
+    /* .set_tensor_2d_async     = */ NULL,
     /* .cpy_tensor_async        = */ NULL,
     /* .synchronize             = */ NULL,
     /* .graph_plan_create       = */ NULL,
@@ -448,6 +455,8 @@ void ggml_backend_zendnn_set_n_threads(ggml_backend_t backend_zendnn, int n_thre
 
     ggml_backend_zendnn_context * ctx = (ggml_backend_zendnn_context *)backend_zendnn->context;
     ctx->n_threads = n_threads;
+    // Device context: used during supports_op / graph planning
+    g_zendnn_dev_ctx.n_threads = n_threads;
 }
 
 // device interface
@@ -539,10 +548,23 @@ static bool ggml_backend_zendnn_device_supports_op(ggml_backend_dev_t dev, const
             const int64_t ne0 = op->ne[0];
             const int64_t ne1 = op->ne[1];
 
-            const int64_t min_batch = 1;
+            const int64_t K = inputs->ne[0]; 
+            if(K <= 256) {
+                return false;
+            }
+            
+            const ggml_backend_zendnn_device_context * dev_ctx =
+                                (const ggml_backend_zendnn_device_context *)dev->context;
+            const int n_threads = dev_ctx ? dev_ctx->n_threads : GGML_DEFAULT_N_THREADS;
+            
+            int64_t min_batch = 64;
+            if      (n_threads >= 64) min_batch = 128;
+            else if (n_threads >= 32) min_batch = 96;
+
             if (!ggml_is_contiguous(weights) || !ggml_is_contiguous(inputs) ||
-                ne0 < min_batch || ne1 < min_batch || ne10 < min_batch) {
-                    return false;
+                ne0 < min_batch || ne1 < min_batch || ne10 < min_batch ||
+                (inputs->ne[1]*inputs->ne[2]*inputs->ne[3]) <= min_batch) {
+                return false;
             }
             // MUL_MAT_ID performs best with a moderate number of experts due to its
             // gather + batched matmul + scatter approach. Future versions will leverage
@@ -614,7 +636,7 @@ static ggml_backend_dev_t ggml_backend_zendnn_reg_get_device(ggml_backend_reg_t 
     static ggml_backend_device ggml_backend_zendnn_device = {
         /* .iface   = */ ggml_backend_zendnn_device_i,
         /* .reg     = */ reg,
-        /* .context = */ nullptr,
+        /* .context = */ &g_zendnn_dev_ctx,
     };
 
     return &ggml_backend_zendnn_device;
