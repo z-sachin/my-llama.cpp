@@ -520,9 +520,10 @@ static ggml_backend_buffer_t ggml_backend_zendnn_device_buffer_from_host_ptr(ggm
     GGML_UNUSED(dev);
     GGML_UNUSED(max_tensor_size);
 }
+
 static bool ggml_zendnn_adaptive_fallback_enabled() {
-    static const bool enabled = (std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK") == nullptr) ||
-                                (std::strcmp(std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK"), "0") != 0);
+    static const bool enabled = std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK") == nullptr ||
+                                std::atoi(std::getenv("GGML_ZENDNN_ADAPTIVE_FALLBACK")) != 0;
     return enabled;
 }
 
